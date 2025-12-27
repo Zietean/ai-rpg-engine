@@ -12,7 +12,6 @@ CLASSES = {
     "Warrior": {"baseHp": 10, "hpPerLevel": 6, "skills": {1: ["Second Wind", "Power Strike"], 3: ["Shield Bash"], 5: ["Whirlwind"]}},
     "Rogue": {"baseHp": 8, "hpPerLevel": 5, "skills": {1: ["Sneak Attack", "Cunning Action"], 3: ["Evasion"], 5: ["Shadow Step"]}}
 }
-# Standard D&D 5e Checks
 DND_SKILLS = [
     "Strength (Athletics)", "Dexterity (Acrobatics)", "Dexterity (Stealth)", "Dexterity (Sleight of Hand)",
     "Intelligence (Arcana)", "Intelligence (History)", "Intelligence (Investigation)", "Intelligence (Nature)",
@@ -20,41 +19,48 @@ DND_SKILLS = [
     "Charisma (Persuasion)", "Charisma (Deception)", "Charisma (Intimidation)", "General D20 Roll"
 ]
 
-st.set_page_config(page_title="AI RPG Engine v13", layout="wide")
+st.set_page_config(page_title="AI RPG Engine v14", layout="wide")
 
 if "state" not in st.session_state: st.session_state.state = None
 if "history" not in st.session_state: st.session_state.history = []
 if "model_list" not in st.session_state: st.session_state.model_list = []
 
-# --- 2. TAG PARSER ---
+# --- 2. THE "FORGIVING" TAG PARSER ---
 def parse_tags(text):
     s = st.session_state.state
     if not s: return
     
-    # XP & DAMAGE
-    xp_m = re.search(r"\[XP:\s*(\+?\d+)\]", text, re.IGNORECASE)
+    # 1. XP PARSER (Looking for [XP: 10] or XP: 10)
+    xp_m = re.search(r"\[?XP:\s*(\+?\d+)\]?", text, re.IGNORECASE)
     if xp_m:
         gain = int(xp_m.group(1).replace('+', ''))
         s['xp'] += gain
         st.toast(f"✨ +{gain} XP")
     
-    dmg_m = re.search(r"\[DAMAGE:\s*(\d+)\]", text, re.IGNORECASE)
+    # 2. DAMAGE PARSER
+    dmg_m = re.search(r"\[?DAMAGE:\s*(\d+)\]?", text, re.IGNORECASE)
     if dmg_m:
         dmg = int(dmg_m.group(1))
         s['hp'] -= dmg
         st.toast(f"🩸 Taken {dmg} Damage!")
 
-    # ITEMS
-    for item in re.findall(r"\[REMOVE\s*ITEM:\s*(.*?)\]", text, re.IGNORECASE):
+    # 3. FORGIVING ITEM PARSER (Works with or without brackets)
+    # This regex looks for "ADD ITEM: something" and stops at a newline or bracket
+    for item in re.findall(r"\[?(?:ADD|GAIN)\s*ITEM:\s*([^\n\]\)]+)(?:\]|\)|$)", text, re.IGNORECASE):
         clean = item.strip()
+        # Clean up common AI artifacts like "20 gold coins (for rescuing)"
+        clean = clean.split('(')[0].strip()
+        if clean and clean not in s['inv']: 
+            s['inv'].append(clean)
+            st.toast(f"🎒 Item: {clean}")
+
+    # 4. REMOVE ITEM
+    for item in re.findall(r"\[?REMOVE\s*ITEM:\s*([^\n\]\)]+)(?:\]|\)|$)", text, re.IGNORECASE):
+        clean = item.strip().split('(')[0].strip()
         for i in list(s['inv']):
             if clean.lower() in i.lower(): s['inv'].remove(i); st.toast(f"📤 Removed: {i}"); break
 
-    for item in re.findall(r"\[(?:ADD|GAIN)\s*ITEM:\s*(.*?)\]", text, re.IGNORECASE):
-        clean = item.strip()
-        if clean and clean not in s['inv']: s['inv'].append(clean); st.toast(f"🎒 Item: {clean}")
-
-    # LEVEL UP
+    # 5. LEVEL UP CHECK
     next_lv = s['level'] + 1
     if next_lv in XP_TABLE and s['xp'] >= XP_TABLE[next_lv]:
         s['level'] = next_lv
@@ -131,14 +137,15 @@ if prompt := st.chat_input("What do you do?"):
 
 if st.session_state.history and st.session_state.history[-1]["role"] == "user":
     s = st.session_state.state
-    # --- PROMPT ---
-    sys = (f"ACT AS: Dungeon Master (D&D 5e Style). Player: '{s['name']}' (Level {s['level']} {s['class']}). "
+    
+    # --- PROMPT: STRICT "DO NOT ROLL" INSTRUCTIONS ---
+    sys = (f"ACT AS: Dungeon Master. Player: '{s['name']}' (Level {s['level']} {s['class']}). "
            f"Setting: {s['setting']}. "
-           f"RULES: \n"
-           f"1. If action is risky, ASK player to [ROLL D20].\n"
-           f"2. If player rolls, determine DC and outcome. Narrate success/failure.\n"
-           f"3. Output [ADD ITEM: Name] for loot.\n"
-           f"4. Output [REMOVE ITEM: Name] for losses.\n"
+           f"HARD RULES: \n"
+           f"1. NEVER ROLL DICE FOR THE PLAYER. If an action is risky, stop and ASK the player to roll.\n"
+           f"2. Use format [ADD ITEM: Name] for loot.\n"
+           f"3. Use format [REMOVE ITEM: Name] for losses.\n"
+           f"4. Use format [XP: +Amount] for rewards.\n"
            f"5. Always end with 'What do you do?'\n"
            f"Inv: {', '.join(s['inv'])}.")
     
@@ -158,38 +165,30 @@ if st.session_state.history and st.session_state.history[-1]["role"] == "user":
                 parse_tags(reply); st.rerun()
             except Exception as e: st.error(f"Error: {str(e)}")
 
-# --- 5. ACTION BAR (DYNAMIC SKILLS) ---
+# --- 5. ACTION BAR ---
 if st.session_state.state:
     st.markdown("---")
-    
     c1, c2, c3 = st.columns([0.4, 0.3, 0.3])
     
     with c1:
-        # COMBINE CLASS SKILLS + DND SKILLS
         my_skills = st.session_state.state['skills'] + ["--- General Checks ---"] + DND_SKILLS
         skill_choice = st.selectbox("Select Action/Skill:", my_skills, label_visibility="collapsed")
-        
         if st.button(f"🎲 Roll {skill_choice.split('(')[0]}", use_container_width=True):
-            if "---" in skill_choice:
-                st.toast("⚠️ Please select a valid skill!")
+            if "---" in skill_choice: st.toast("⚠️ Select a skill!")
             else:
                 roll = random.randint(1, 20)
                 outcome = "CRITICAL FAIL!" if roll == 1 else "CRITICAL SUCCESS!" if roll == 20 else "Result"
-                # Send context to AI
-                msg = f"[SYSTEM: Player uses {skill_choice}. Rolled D20: {roll} ({outcome}). Narrate the result!]"
+                msg = f"[SYSTEM: Player uses {skill_choice}. Rolled D20: {roll} ({outcome}). Determine outcome.]"
                 st.toast(f"🎲 {skill_choice}: {roll}")
-                st.session_state.history.append({"role":"user","content":msg})
-                st.rerun()
+                st.session_state.history.append({"role":"user","content":msg}); st.rerun()
 
     with c2:
         if st.button("🍃 Cozy Moment", use_container_width=True):
-            st.session_state.history.append({"role":"user","content":"[SYSTEM: Trigger a peaceful, character-building moment.]"})
-            st.rerun()
+            st.session_state.history.append({"role":"user","content":"[SYSTEM: Trigger a peaceful moment.]"}); st.rerun()
 
     with c3:
-        if st.button("⚔️ Combat / Danger", use_container_width=True):
-            st.session_state.history.append({"role":"user","content":"[SYSTEM: A sudden threat appears! Ask for Initiative.]"})
-            st.rerun()
+        if st.button("⚔️ Combat", use_container_width=True):
+            st.session_state.history.append({"role":"user","content":"[SYSTEM: Threat appears! Ask for Initiative.]"}); st.rerun()
 
 # --- 6. START MODAL ---
 if st.session_state.get("show_modal"):
@@ -197,5 +196,5 @@ if st.session_state.get("show_modal"):
         n = st.text_input("Name", "Rennie"); cl = st.selectbox("Class", list(CLASSES.keys())); w = st.text_area("World", "Oakhaven.")
         if st.form_submit_button("Start Adventure"):
             st.session_state.state = {"name":n,"class":cl,"level":1,"xp":0,"hp":CLASSES[cl]['baseHp'],"skills":list(CLASSES[cl]['skills'][1]),"inv":["Clothes"],"journal":[],"comps":[],"setting":w}
-            st.session_state.history = [{"role":"user","content":f"[START: DM Mode. Player is {n} ({cl}). Describe opening. CRITICAL: If items found, use [ADD ITEM: Name]. End with 'What do you do?']"}]
+            st.session_state.history = [{"role":"user","content":f"[START: Player is {n}. Describe opening. If items found, output [ADD ITEM: Name]. End with 'What do you do?']"}]
             st.session_state.show_modal = False; st.rerun()
