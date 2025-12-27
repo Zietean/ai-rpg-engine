@@ -5,15 +5,22 @@ import random
 import re
 import os
 
-# --- 1. DATA & CONFIGURATION ---
+# --- 1. CONFIGURATION & RULES ---
 XP_TABLE = {1: 0, 2: 300, 3: 900, 4: 2700, 5: 6500}
 CLASSES = {
     "Mage": {"baseHp": 6, "hpPerLevel": 4, "skills": {1: ["Fire Bolt", "Arcane Shield"], 3: ["Mage Armor"], 5: ["Fireball"]}},
     "Warrior": {"baseHp": 10, "hpPerLevel": 6, "skills": {1: ["Second Wind", "Power Strike"], 3: ["Shield Bash"], 5: ["Whirlwind"]}},
     "Rogue": {"baseHp": 8, "hpPerLevel": 5, "skills": {1: ["Sneak Attack", "Cunning Action"], 3: ["Evasion"], 5: ["Shadow Step"]}}
 }
+# Standard D&D 5e Checks
+DND_SKILLS = [
+    "Strength (Athletics)", "Dexterity (Acrobatics)", "Dexterity (Stealth)", "Dexterity (Sleight of Hand)",
+    "Intelligence (Arcana)", "Intelligence (History)", "Intelligence (Investigation)", "Intelligence (Nature)",
+    "Wisdom (Insight)", "Wisdom (Perception)", "Wisdom (Medicine)", "Wisdom (Survival)",
+    "Charisma (Persuasion)", "Charisma (Deception)", "Charisma (Intimidation)", "General D20 Roll"
+]
 
-st.set_page_config(page_title="AI RPG Engine v9.0", layout="wide")
+st.set_page_config(page_title="AI RPG Engine v13", layout="wide")
 
 if "state" not in st.session_state: st.session_state.state = None
 if "history" not in st.session_state: st.session_state.history = []
@@ -23,31 +30,41 @@ if "model_list" not in st.session_state: st.session_state.model_list = []
 def parse_tags(text):
     s = st.session_state.state
     if not s: return
-    # XP
-    xp_m = re.search(r"\[XP:\s*(\d+)\]", text, re.IGNORECASE)
+    
+    # XP & DAMAGE
+    xp_m = re.search(r"\[XP:\s*(\+?\d+)\]", text, re.IGNORECASE)
     if xp_m:
-        gain = int(xp_m.group(1))
+        gain = int(xp_m.group(1).replace('+', ''))
         s['xp'] += gain
         st.toast(f"✨ +{gain} XP")
-    # Removal (Trade Safety)
+    
+    dmg_m = re.search(r"\[DAMAGE:\s*(\d+)\]", text, re.IGNORECASE)
+    if dmg_m:
+        dmg = int(dmg_m.group(1))
+        s['hp'] -= dmg
+        st.toast(f"🩸 Taken {dmg} Damage!")
+
+    # ITEMS
     for item in re.findall(r"\[REMOVE\s*ITEM:\s*(.*?)\]", text, re.IGNORECASE):
-        clean_name = item.strip().lower()
+        clean = item.strip()
         for i in list(s['inv']):
-            if clean_name in i.lower():
-                s['inv'].remove(i); st.toast(f"📤 Removed: {i}"); break
-    # Add Item
+            if clean.lower() in i.lower(): s['inv'].remove(i); st.toast(f"📤 Removed: {i}"); break
+
     for item in re.findall(r"\[(?:ADD|GAIN)\s*ITEM:\s*(.*?)\]", text, re.IGNORECASE):
-        if item.strip() and item.strip() not in s['inv']:
-            s['inv'].append(item.strip()); st.toast(f"🎒 Item: {item.strip()}")
-    # Companions & Journal
-    for comp in re.findall(r"\[ADD\s*COMPANION:\s*(.*?)\]", text, re.IGNORECASE):
-        if comp.strip() not in s['comps']: s['comps'].append(comp.strip()); st.toast(f"🤝 Companion: {comp.strip()}")
-    for entry in re.findall(r"\[(?:UPDATE|ADD TO)\s*JOURNAL:\s*(.*?)\]", text, re.IGNORECASE):
-        if entry.strip() not in s['journal']: s['journal'].append(entry.strip()); st.toast("📔 Journal Updated")
+        clean = item.strip()
+        if clean and clean not in s['inv']: s['inv'].append(clean); st.toast(f"🎒 Item: {clean}")
+
+    # LEVEL UP
+    next_lv = s['level'] + 1
+    if next_lv in XP_TABLE and s['xp'] >= XP_TABLE[next_lv]:
+        s['level'] = next_lv
+        s['hp'] += CLASSES[s['class']]['hpPerLevel']
+        s['skills'].extend(CLASSES[s['class']]['skills'].get(next_lv, []))
+        st.balloons(); st.success(f"🌟 LEVEL UP! You are now Level {next_lv}!")
 
 # --- 3. SIDEBAR ---
 with st.sidebar:
-    st.title("⚙️ AI Settings")
+    st.title("⚙️ Settings")
     api_source = st.selectbox("Source", ["ollama", "openrouter"])
     ollama_url = st.text_input("Ollama URL", "http://127.0.0.1:11434") if api_source == "ollama" else ""
     api_key = st.text_input("Key", type="password") if api_source == "openrouter" else ""
@@ -55,22 +72,23 @@ with st.sidebar:
     if st.button("Refresh Models"):
         try:
             if api_source == "ollama":
-                r = requests.get(f"{ollama_url}/api/tags", timeout=10)
+                r = requests.get(f"{ollama_url}/api/tags", timeout=5)
                 st.session_state.model_list = [m['name'] for m in r.json().get('models', [])]
             else:
-                r = requests.get("https://openrouter.ai/api/v1/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=15)
+                r = requests.get("https://openrouter.ai/api/v1/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
                 st.session_state.model_list = sorted([m['id'] for m in r.json().get('data', [])])
-            st.success("Connected!"); st.rerun()
-        except Exception as e: st.error(f"Failed: {str(e)}")
+            st.success("Connected!")
+        except: st.error("Connection Failed")
 
     selected_model = st.selectbox("Model", st.session_state.model_list if st.session_state.model_list else ["Not Connected"])
     
+    st.divider()
     if st.session_state.state:
-        cs1, cs2 = st.columns(2)
-        if cs1.button("💾 Save"):
+        c1, c2 = st.columns(2)
+        if c1.button("💾 Save"):
             with open("rpg_save.json", "w") as f: json.dump({"state": st.session_state.state, "history": st.session_state.history}, f)
-            st.toast("Saved!")
-        if cs2.button("📂 Load") and os.path.exists("rpg_save.json"):
+            st.toast("Saved")
+        if c2.button("📂 Load") and os.path.exists("rpg_save.json"):
             with open("rpg_save.json", "r") as f:
                 d = json.load(f); st.session_state.state, st.session_state.history = d["state"], d["history"]
             st.rerun()
@@ -79,33 +97,28 @@ with st.sidebar:
 
     if st.session_state.state:
         st.divider()
-        t1, t2 = st.tabs(["📜 Sheet", "📔 Journal"])
+        s = st.session_state.state
+        max_hp = CLASSES[s['class']]['baseHp'] + (s['level']-1) * CLASSES[s['class']]['hpPerLevel']
+        st.subheader(f"{s['name']} (Lv {s['level']} {s['class']})")
+        st.progress(min(1.0, max(0.0, s['hp']/max_hp)))
+        st.write(f"❤️ **HP:** {s['hp']}/{max_hp} | ✨ **XP:** {s['xp']}")
+        st.markdown("---")
+        
+        t1, t2 = st.tabs(["🎒 Inventory", "📜 Skills"])
         with t1:
-            s = st.session_state.state
-            max_hp = CLASSES[s['class']]['baseHp'] + (s['level']-1) * CLASSES[s['class']]['hpPerLevel']
-            st.write(f"**{s['name']}** (Lv {s['level']} {s['class']})")
-            st.progress(max(0.0, min(1.0, s['hp']/max_hp)))
-            st.write(f"**Skills:** {', '.join(s['skills'])}")
-            
-            if s['comps']:
-                st.write("**Companions:**")
-                for c_name in s['comps']:
-                    cc = st.columns([0.6, 0.2, 0.2])
-                    cc[0].write(f"🤝 {c_name}")
-                    if cc[1].button("💬", key=f"tk_{c_name}"):
-                        st.session_state.history.append({"role":"user","content":f"[SYSTEM: Talk to {c_name}]"}); st.rerun()
-                    if cc[2].button("🚶", key=f"lv_{c_name}"):
-                        st.session_state.history.append({"role":"user","content":f"[SYSTEM: {c_name} leaves party. use [REMOVE COMPANION: {c_name}]]"}); st.rerun()
-
-            st.write("**Inventory:**")
+            new_item = st.text_input("Add Item (Manual)", placeholder="E.g. Coin")
+            if st.button("Add"): 
+                if new_item and new_item not in s['inv']: s['inv'].append(new_item); st.rerun()
+            st.write("---")
             for item in list(s['inv']):
-                ic = st.columns([0.6, 0.2, 0.2])
-                ic[0].write(f"• {item}")
-                if ic[1].button("🎁", key=f"g_{item}"):
-                    st.session_state.history.append({"role":"user","content":f"[SYSTEM: {s['name']} hands over {item}. React and use [REMOVE ITEM: {item}].]"}); st.rerun()
-                if ic[2].button("🗑️", key=f"d_{item}"): s['inv'].remove(item); st.rerun()
+                col = st.columns([0.6, 0.2, 0.2])
+                col[0].write(f"• {item}")
+                if col[1].button("🎁", key=f"g_{item}"):
+                    st.session_state.history.append({"role":"user","content":f"[SYSTEM: {s['name']} gives '{item}'. REMOVE it from inventory.]"}); st.rerun()
+                if col[2].button("🗑️", key=f"d_{item}"): s['inv'].remove(item); st.rerun()
         with t2:
-            for note in s['journal']: st.write(f"• {note}")
+            st.write("**Known Abilities:**")
+            for sk in s['skills']: st.write(f"⚔️ {sk}")
 
 # --- 4. CHAT ---
 st.title("🐉 AI RPG Engine")
@@ -118,20 +131,23 @@ if prompt := st.chat_input("What do you do?"):
 
 if st.session_state.history and st.session_state.history[-1]["role"] == "user":
     s = st.session_state.state
-    # ULTRA-STRICT ROLEPLAY INSTRUCTIONS
-    sys = (f"ACT AS: Dungeon Master (Narrator). "
-           f"IMPORTANT: The User is playing as '{s['name']}'. "
-           f"NEVER treat '{s['name']}' as an NPC or merchant. "
-           f"NEVER speak for '{s['name']}'. Always address the user as 'You'. "
-           f"SETTING: {s['setting']}. Reward actions with [XP: n]. "
-           f"TAGS: [XP: n], [DAMAGE: n], [ADD ITEM: n], [REMOVE ITEM: n], [UPDATE JOURNAL: text].")
+    # --- PROMPT ---
+    sys = (f"ACT AS: Dungeon Master (D&D 5e Style). Player: '{s['name']}' (Level {s['level']} {s['class']}). "
+           f"Setting: {s['setting']}. "
+           f"RULES: \n"
+           f"1. If action is risky, ASK player to [ROLL D20].\n"
+           f"2. If player rolls, determine DC and outcome. Narrate success/failure.\n"
+           f"3. Output [ADD ITEM: Name] for loot.\n"
+           f"4. Output [REMOVE ITEM: Name] for losses.\n"
+           f"5. Always end with 'What do you do?'\n"
+           f"Inv: {', '.join(s['inv'])}.")
     
     with st.chat_message("assistant"):
-        with st.spinner("DM Thinking..."):
+        with st.spinner("DM is thinking..."):
             try:
                 ctx = [{"role":"system","content":sys}] + st.session_state.history[-10:]
                 if api_source == "ollama":
-                    r = requests.post(f"{ollama_url}/api/chat", json={"model": selected_model, "messages": ctx, "stream": False}, timeout=120)
+                    r = requests.post(f"{ollama_url}/api/chat", json={"model": selected_model, "messages": ctx, "stream": False}, timeout=None)
                     reply = r.json()['message']['content']
                 else:
                     r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {api_key}"}, json={"model": selected_model, "messages": ctx}, timeout=60)
@@ -142,19 +158,44 @@ if st.session_state.history and st.session_state.history[-1]["role"] == "user":
                 parse_tags(reply); st.rerun()
             except Exception as e: st.error(f"Error: {str(e)}")
 
-# --- 5. MODAL ---
+# --- 5. ACTION BAR (DYNAMIC SKILLS) ---
+if st.session_state.state:
+    st.markdown("---")
+    
+    c1, c2, c3 = st.columns([0.4, 0.3, 0.3])
+    
+    with c1:
+        # COMBINE CLASS SKILLS + DND SKILLS
+        my_skills = st.session_state.state['skills'] + ["--- General Checks ---"] + DND_SKILLS
+        skill_choice = st.selectbox("Select Action/Skill:", my_skills, label_visibility="collapsed")
+        
+        if st.button(f"🎲 Roll {skill_choice.split('(')[0]}", use_container_width=True):
+            if "---" in skill_choice:
+                st.toast("⚠️ Please select a valid skill!")
+            else:
+                roll = random.randint(1, 20)
+                outcome = "CRITICAL FAIL!" if roll == 1 else "CRITICAL SUCCESS!" if roll == 20 else "Result"
+                # Send context to AI
+                msg = f"[SYSTEM: Player uses {skill_choice}. Rolled D20: {roll} ({outcome}). Narrate the result!]"
+                st.toast(f"🎲 {skill_choice}: {roll}")
+                st.session_state.history.append({"role":"user","content":msg})
+                st.rerun()
+
+    with c2:
+        if st.button("🍃 Cozy Moment", use_container_width=True):
+            st.session_state.history.append({"role":"user","content":"[SYSTEM: Trigger a peaceful, character-building moment.]"})
+            st.rerun()
+
+    with c3:
+        if st.button("⚔️ Combat / Danger", use_container_width=True):
+            st.session_state.history.append({"role":"user","content":"[SYSTEM: A sudden threat appears! Ask for Initiative.]"})
+            st.rerun()
+
+# --- 6. START MODAL ---
 if st.session_state.get("show_modal"):
     with st.form("new"):
         n = st.text_input("Name", "Rennie"); cl = st.selectbox("Class", list(CLASSES.keys())); w = st.text_area("World", "Oakhaven.")
-        if st.form_submit_button("Start"):
+        if st.form_submit_button("Start Adventure"):
             st.session_state.state = {"name":n,"class":cl,"level":1,"xp":0,"hp":CLASSES[cl]['baseHp'],"skills":list(CLASSES[cl]['skills'][1]),"inv":["Clothes"],"journal":[],"comps":[],"setting":w}
-            # Explicit start command to prevent identity confusion
-            st.session_state.history = [{"role":"user","content":f"[START GAME: You are the DM. The player is '{n}'. Describe the opening scene. DO NOT make '{n}' an NPC.]"}]
+            st.session_state.history = [{"role":"user","content":f"[START: DM Mode. Player is {n} ({cl}). Describe opening. CRITICAL: If items found, use [ADD ITEM: Name]. End with 'What do you do?']"}]
             st.session_state.show_modal = False; st.rerun()
-
-if st.session_state.state:
-    b1, b2, b3 = st.columns(3)
-    if b1.button("🎲 Skill Check"):
-        roll = random.randint(1, 20); st.session_state.history.append({"role":"user","content":f"[SYSTEM: Roll D20. Result: {roll}.]"}); st.rerun()
-    if b2.button("🍃 Cozy Event"): st.session_state.history.append({"role":"user","content":"[SYSTEM: Trigger cozy event.]"}); st.rerun()
-    if b3.button("⚔️ Adventure!"): st.session_state.history.append({"role":"user","content":"[SYSTEM: Trigger adventure.]"}); st.rerun()
