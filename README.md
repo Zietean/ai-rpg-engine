@@ -34,7 +34,7 @@ This project is intended as a **playable experiment** and a **reference implemen
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ai-rpg-engine.git
+git clone https://github.com/Zietean/ai-rpg-engine.git
 cd ai-rpg-engine
 ```
 
@@ -156,4 +156,4 @@ README.md           Documentation
 
 ## License
 
-MIT License (or specify another license if applicable)
+MIT License
